@@ -7,6 +7,7 @@ except PackageNotFoundError:
 
 from efm.aggregators import (
     AGGREGATORS,
+    CLOSED_FORM,
     EvidenceAggregator,
     GaussianTemplate,
     HyperplaneArrangement,
@@ -30,6 +31,7 @@ __all__ = [
     "HyperplaneArrangement",
     "StateCoupledRecurrence",
     "AGGREGATORS",
+    "CLOSED_FORM",
     "build_aggregator",
     "normalize_aggregator_name",
     "RuleExplainer",

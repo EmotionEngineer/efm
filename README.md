@@ -1,122 +1,119 @@
 # EFM — Explainable Fuzzy Machines
 
-**EFM** is a lightweight PyTorch and scikit-learn library for tabular machine learning, built entirely from differentiable fuzzy rules.
+**EFM** is a lightweight PyTorch and scikit-learn library for tabular machine learning.
 
-While tree ensembles act as black boxes, and GAMs (like EBM) rely on additive shape functions, EFM uses gradient descent to learn explicit, human-readable `IF-THEN` rules. The fitted model exposes its internal logic—including explicit thresholds, feature masks, and evidence signs—while training in seconds on a GPU.
+The public API is two estimators. A string `aggregator` selects the internals: differentiable fuzzy rules (GPU, gradient descent) or a closed-form rule book (CPU, spectral-floored ridge). Both print `IF-THEN` logic.
 
 ```python
 from efm import EFMRegressor, EFMClassifier
 
-EFMRegressor(aggregator="gaussian")        # Gaussian template matching
-EFMRegressor(aggregator="student_t")       # Heavy-tailed template matching
-EFMClassifier(aggregator="hyperplane")     # Piecewise-linear evidence
-EFMClassifier(aggregator="state_coupled")  # Recurrent state-coupled evidence
+EFMRegressor(aggregator="gaussian")          # Gaussian template matching
+EFMRegressor(aggregator="student_t")         # Heavy-tailed templates
+EFMRegressor(aggregator="residual")          # Affine leaves + residual CART
+EFMRegressor(aggregator="residual", n_rounds=3)
+EFMClassifier(aggregator="hyperplane")       # Piecewise-linear evidence
+EFMClassifier(aggregator="piecewise")        # Two-piece linear GAM
+EFMClassifier(aggregator="state_coupled")    # Recurrent rule state
 ```
 
 ---
 
 ## Why EFM?
 
-EFM occupies a unique space on the Pareto frontier of accuracy and interpretability. To illustrate, here is how different explainable models attempt to recover a known synthetic ground-truth rule:
+Tree ensembles are accurate and opaque. GAMs such as EBM give shape plots, not thresholds. EFM learns explicit, human-readable rules.
 
-> **Ground Truth:** `IF x0 > 0.5 AND x1 < 0 THEN +3.0 ...`
+> **Ground truth:** `IF x0 > 0.5 AND x1 < 0 THEN +3.0 …`
 
-**1. Explainable Boosting Machines (EBM)**
-EBM provides excellent predictive accuracy by learning additive shape functions, but it does not produce symbolic logic or thresholds.
+**EBM** — importances and pairwise heatmaps, no symbolic cuts.
+
 ```text
-# EBM Output (Feature Importances & Pairs)
 x0 (0.38) | x1 (0.36) | x0 × x1 (0.26)
 ```
 
-**2. RuleFit**
-RuleFit extracts rules from shallow decision trees. While it provides thresholds, the resulting rules are often highly overlapping, dense, visually overwhelming, and slow to train.
+**RuleFit** — thresholds, but dense overlapping trees.
+
 ```text
-# RuleFit Output (Messy, overlapping rules)
-x0 <= 0.171 and x1 > 0.690 | x0 > 1.661 and x1 > -0.191 and x4 <= 0.859 | x4
+x0 <= 0.171 and x1 > 0.690 | x0 > 1.661 and x1 > -0.191 and x4 <= 0.859
 ```
 
-**3. EFM (Explainable Fuzzy Machines)**
-EFM uses L1-masked gradient descent to prune irrelevant literals, resulting in clean, sparse, and mutually exclusive fuzzy rules.
+**EFM** — sparse literals after L1 masking (differentiable) or a jointly refit affine book (closed-form).
+
 ```text
-# EFM Output (Clean, sparse, readable thresholds)
 Rule 1: x0 > +0.460 AND x1 < -0.021
 Rule 2: x2 > +1.035 AND x5 < +0.249
 ```
 
 ---
 
-## Model Sketch
+## Differentiable path
 
-An EFM model has three main parts:
-
-1. **Axis-aligned fuzzy literals**
-   Each rule compares each feature against a learned threshold using a soft inequality.
-2. **Evidence aggregation**
-   The per-feature log margins are reduced to one evidence score per rule.
-3. **Linear prediction head**
-   Rule firing strengths are passed to a linear head for regression or classification.
-
-In rough form:
+Fuzzy aggregators (`student_t`, `gaussian`, `hyperplane`, `state_coupled`) train an `nn.Module`:
 
 ```text
 x
 │
-├─ fuzzy rule layer
-│     feature thresholds
-│     inequality directions
-│     feature masks
-│
+├─ fuzzy rule layer     thresholds, inequality signs, feature masks
 ├─ log-margin tensor
-│
 ├─ evidence aggregator
-│     gaussian | student_t | hyperplane | state_coupled
-│
 ├─ rule firing strengths
-│
-└─ linear output head
-      regression value or class logits
+└─ linear head          regression value or class logits
 ```
+
+Training uses AdamW, a validation split, and early stopping. Typical fit time is seconds on a GPU.
+
+---
+
+## Closed-form path
+
+These aggregators skip PyTorch. Coefficients are a single spectral-floored ridge (SFR) fit.
+
+| `aggregator` | What you get |
+| --- | --- |
+| `"affine"` | Boosted affine rectangles, jointly refit |
+| `"residual"` | Affine book + residual CART × `n_rounds` + path smoothing |
+| `"piecewise"` | Additive two-piece linear GAM |
+| `"split_linear"` | `IF vᵀx ≤ t THEN affine ELSE affine` |
+
+`n_rounds=2` (default) or `3` is the only extra knob for `"residual"`. Prefer `"piecewise"` on additive classification; `"residual"` / `"affine"` on region-heavy tables. Do not mix `"piecewise"` and `"residual"` in one coefficient vector.
 
 ---
 
 ## Aggregators
 
-| Aggregator | Legacy alias | Main idea |
+| Aggregator | Kind | Idea |
 | --- | --- | --- |
-| `"student_t"` | `"SMTE"` | Heavy-tailed template matching in log-margin space |
-| `"gaussian"` | `"GMTE"` | Gaussian template matching in log-margin space |
-| `"hyperplane"` | `"HYP"` | Sum of learned ReLU hyperplane responses |
-| `"state_coupled"` | `"SC"` | A short learned linear recurrence over rule state |
+| `"student_t"` | fuzzy | Heavy-tailed template matching in log-margin space |
+| `"gaussian"` | fuzzy | Gaussian template matching |
+| `"hyperplane"` | fuzzy | Sum of learned ReLU hyperplanes |
+| `"state_coupled"` | fuzzy | Short linear recurrence over rule state |
+| `"affine"` | closed | Jointly refit affine rectangles |
+| `"residual"` | closed | Residual CART on an affine book |
+| `"piecewise"` | closed | Two linear pieces per coordinate |
+| `"split_linear"` | closed | One split direction, two affines |
 
-The same `EFM` class is used in all cases. Only the aggregator changes.
+Aliases (`"SMTE"`, `"GMTE"`, `"HYP"`, `"SC"`) still resolve to the fuzzy names.
 
 ---
 
 ## Installation
 
-Install the latest stable release directly from PyPI:
-
 ```bash
 pip install efm
 ```
 
-**From Source:**
-If you want to install from a local checkout:
+From a checkout:
+
 ```bash
 git clone https://github.com/EmotionEngineer/efm.git
 cd efm
 pip install -e .
-```
-
-For development (includes testing tools):
-```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"   # pytest, ruff, mypy
 pytest tests -v
 ```
 
 ---
 
-## Quick Start: Regression
+## Quick start: regression
 
 ```python
 from sklearn.datasets import load_diabetes
@@ -125,10 +122,7 @@ from efm import EFMRegressor
 
 data = load_diabetes(as_frame=True)
 X_train, X_test, y_train, y_test = train_test_split(
-    data.data,
-    data.target,
-    test_size=0.2,
-    random_state=0,
+    data.data, data.target, test_size=0.2, random_state=0,
 )
 
 model = EFMRegressor(
@@ -137,19 +131,24 @@ model = EFMRegressor(
     epochs=200,
     random_state=0,
 )
-
 model.fit(X_train, y_train)
-pred = model.predict(X_test)
-
-print(pred[:5])
+print(model.predict(X_test)[:5])
 print(model.explain(top_k=5))
+```
+
+No GPU, no epoch loop:
+
+```python
+model = EFMRegressor(aggregator="residual", n_rounds=2, random_state=0)
+model.fit(X_train, y_train)
+print(model.explain(top_k=8))
 ```
 
 ---
 
-## Quick Start: Classification
+## Quick start: classification
 
-By setting `kappa_gating=True`, the model scales the steepness ($\kappa$) of the fuzzy boundary directly. This prevents mask parameters from cancelling out inside the log-ratio, allowing the L1 penalty to prune the 16 noise features.
+`kappa_gating=True` scales the steepness of each fuzzy boundary so L1 masking can drop noise features instead of cancelling inside the log-ratio.
 
 ```python
 import pandas as pd
@@ -157,48 +156,41 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from efm import EFMClassifier
 
-# Generate classification data with 20 features (only 4 are actually useful)
 X_raw, y_raw = make_classification(
-    n_samples=1000,
-    n_features=20,
-    n_informative=4,
-    n_redundant=0,
-    random_state=0
+    n_samples=1000, n_features=20, n_informative=4, n_redundant=0, random_state=0,
 )
-
-# Convert to DataFrame to assign clean feature names
-feature_names = [f"feat_{i}" for i in range(20)]
-X = pd.DataFrame(X_raw, columns=feature_names)
-y = pd.Series(y_raw)
+X = pd.DataFrame(X_raw, columns=[f"feat_{i}" for i in range(20)])
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=0
+    X, y_raw, test_size=0.2, stratify=y_raw, random_state=0,
 )
 
-# Initialize and train with Kappa Gating enabled for clean feature pruning
 model = EFMClassifier(
     aggregator="student_t",
     n_rules=32,
     epochs=150,
     mask_l1=1e-3,
-    kappa_gating=True,  # Enables robust gradient flow for rule-masking
-    random_state=0
+    kappa_gating=True,
+    random_state=0,
 )
-
 model.fit(X_train, y_train)
-
-labels = model.predict(X_test)
-proba = model.predict_proba(X_test)
-
-print(labels[:5])
+print(model.predict(X_test)[:5])
 print(model.explain(top_k=3, mask_threshold=0.10))
+```
+
+Additive closed-form GAM:
+
+```python
+model = EFMClassifier(aggregator="piecewise", random_state=0)
+model.fit(X_train, y_train)
+print(model.explain())
 ```
 
 ---
 
-## Bare PyTorch Usage
+## Bare PyTorch
 
-The scikit-learn estimators handle preprocessing, validation splitting, target scaling, and training. If you want direct access to the module, use `EFM`.
+Sklearn wrappers handle preprocessing, a validation split, and target scaling. The module itself is `EFM` (fuzzy aggregators only).
 
 ```python
 import torch
@@ -209,38 +201,23 @@ model = EFM(
     n_rules=32,
     n_classes=3,
     aggregator="student_t",
-    kappa_gating=True,  # Optional: enable kappa gating for raw PyTorch usage
+    kappa_gating=True,
 )
-
 x = torch.randn(8, 10)
 y = torch.randint(0, 3, size=(8,))
-
-logits = model(x)
 loss = model.loss_batch(x, y)
-
 loss.backward()
-
-print(logits.shape)
 ```
 
 ---
 
-## Explaining a Fitted Model
-
-The scikit-learn wrappers expose two convenience methods:
+## Explanations
 
 ```python
-# Print the top rules as text
 print(model.explain(top_k=10, mask_threshold=0.10))
-
-# Plot the internal structures (masks, locations, scales)
-fig = model.plot_rules(top_k=10)
+fig = model.plot_rules(top_k=10)          # fuzzy aggregators
 fig.savefig("rules.png", dpi=150)
 ```
-
-The text report lists the most influential rules according to the absolute weights in the output head. Each rule includes active literals, learned thresholds, evidence signs, and mask weights.
-
-Example shape of the output:
 
 ```text
 Rule #01  [id=12, importance=0.8342, n_conds=3, ν=3.91]
@@ -249,69 +226,63 @@ Rule #01  [id=12, importance=0.8342, n_conds=3, ν=3.91]
     s5                             > +0.276  [ev=−, mask=0.31]
 ```
 
-Notes:
-- Thresholds are shown in the transformed feature space used by the model.
-- Numeric features are standardized by the estimator wrapper.
-- Categorical features are one-hot encoded.
-- For exact post-transform feature names, pass names from the fitted preprocessor:
-
-```python
-names = model.preprocessor_.get_feature_names_out()
-print(model.explain(feature_names=list(names), top_k=10))
-```
+- Thresholds are in the **transformed** space (standardized numerics, one-hot categoricals).
+- Pass `model.preprocessor_.get_feature_names_out()` if you need those names explicitly.
+- Closed-form aggregators implement `explain()` only.
 
 ---
 
-## Main Estimator Parameters
+## Parameters
+
+Shared:
 
 | Parameter | Description |
 | --- | --- |
-| `aggregator` | One of `"student_t"`, `"gaussian"`, `"hyperplane"`, `"state_coupled"` |
+| `aggregator` | See the table above |
+| `random_state` | Seed |
+| `val_fraction` | Hold-out fraction when `X_val` is omitted |
+
+Fuzzy:
+
+| Parameter | Description |
+| --- | --- |
 | `n_rules` | Number of fuzzy rules |
-| `n_planes` | Number of planes per rule for the hyperplane aggregator |
-| `steps` | Recurrence depth for the state-coupled aggregator |
-| `epochs` | Maximum training epochs |
-| `lr` | AdamW learning rate |
-| `batch_size` | Mini-batch size |
-| `patience` | Early-stopping patience |
-| `mask_l1` | L1 penalty on feature masks to encourage sparsity |
-| `weight_decay` | AdamW weight decay |
-| `random_state` | Seed for reproducibility |
-| `device` | `"cpu"`, `"cuda"`, or `None` for automatic selection |
-| `val_fraction` | Validation split fraction when no validation set is supplied |
-| `kappa_gating` | If `True`, enables Kappa Gating inside literals to bypass log-ratio cancellation, ensuring robust feature selection gradients. Default is `False`. |
+| `n_planes` | Planes per rule (`hyperplane`) |
+| `steps` | Recurrence depth (`state_coupled`) |
+| `epochs`, `lr`, `batch_size`, `patience` | AdamW training |
+| `mask_l1`, `weight_decay` | Sparsity and decay |
+| `device` | `"cpu"`, `"cuda"`, or `None` (auto) |
+| `kappa_gating` | Steeper literals so masks prune noise. Default `False` |
+
+Closed-form:
+
+| Parameter | Description |
+| --- | --- |
+| `n_rounds` | Residual CART rounds for `"residual"` (`2` or `3`) |
+| `n_trees` | Affine boosting rounds (`"affine"`, `"residual"`) |
+| `smooth` | Path-membership temperature (`"residual"`, default `0.08`) |
+| `min_leaf` | Minimum samples per affine leaf |
 
 ---
 
-## Custom Validation Data
+## Validation split
 
 ```python
-model.fit(
-    X_train,
-    y_train,
-    X_val=X_valid,
-    y_val=y_valid,
-)
+model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
 ```
 
-If no validation set is passed, the estimator creates one internally.
+If `X_val` is omitted, a split of size `val_fraction` is taken from the training data (fuzzy path). Closed-form books fit on the full training matrix.
 
 ---
 
-## Saving and Loading
-
-The sklearn-style estimators can usually be saved with `joblib`:
+## Saving
 
 ```python
 import joblib
-
 joblib.dump(model, "efm_model.joblib")
-loaded = joblib.load("efm_model.joblib")
-
-pred = loaded.predict(X_test)
 ```
 
-For lower-level PyTorch workflows, save the module state dict:
+Fuzzy module weights:
 
 ```python
 torch.save(model.module_.state_dict(), "efm_state.pt")
@@ -321,33 +292,20 @@ torch.save(model.module_.state_dict(), "efm_state.pt")
 
 ## Development
 
-Run the test suite:
-
 ```bash
 pytest tests -v
-```
-
-Run linting:
-
-```bash
 ruff check efm tests
-```
-
-Build a source and wheel distribution:
-
-```bash
 python -m build
 ```
 
 ---
 
-## Current Limitations
+## Limitations
 
-EFM is research-oriented code. A few practical details matter:
-
-- Under the default configuration (`kappa_gating=False`), the masks resides inside the fuzzy subset definitions, which can make them slow to train on small datasets due to log-ratio cancellation. For exact, robust feature selection on small or easy datasets, set `kappa_gating=True`.
-- High-cardinality categorical columns can create many one-hot features.
-- Thresholds in explanations are reported after preprocessing.
+- With `kappa_gating=False`, masks sit inside the fuzzy subset and can train slowly on small data. Use `kappa_gating=True` when feature selection must be sharp.
+- High-cardinality categoricals expand into many one-hot columns.
+- Explanation thresholds are post-preprocessing.
+- `"affine"` and `"residual"` classifiers are **binary**. For multiclass use a fuzzy aggregator, or `"piecewise"` / `"split_linear"`.
 
 ---
 

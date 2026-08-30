@@ -9,7 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
-from efm.aggregators import normalize_aggregator_name
+from efm.aggregators import CLOSED_FORM, normalize_aggregator_name
 from efm.explain import RuleExplainer
 from efm.models import EFM
 from efm.trainer import EFMTrainer, TrainConfig
@@ -59,6 +59,10 @@ class _EFMBase(BaseEstimator):
         device: str | None = None,
         val_fraction: float = 0.15,
         kappa_gating: bool = False,
+        n_rounds: int = 2,
+        n_trees: int = 15,
+        min_leaf: int = 80,
+        smooth: float = 0.08,
     ) -> None:
         self.aggregator = aggregator
         self.n_rules = n_rules
@@ -74,6 +78,10 @@ class _EFMBase(BaseEstimator):
         self.device = device
         self.val_fraction = val_fraction
         self.kappa_gating = kappa_gating
+        self.n_rounds = n_rounds
+        self.n_trees = n_trees
+        self.min_leaf = min_leaf
+        self.smooth = smooth
 
     def _resolve_device(self):
         import torch
@@ -95,6 +103,58 @@ class _EFMBase(BaseEstimator):
             device=self._resolve_device(),
         )
 
+    def _closed_name(self) -> str | None:
+        name = normalize_aggregator_name(self.aggregator)
+        return name if name in CLOSED_FORM else None
+
+    def _build_closed(self, task: str):
+        from efm.rulebook import (
+            AffineRuleClassifier,
+            AffineRuleRegressor,
+            PiecewiseGAMClassifier,
+            PiecewiseGAMRegressor,
+            ResidualRuleClassifier,
+            ResidualRuleRegressor,
+            SplitLinearClassifier,
+            SplitLinearRegressor,
+        )
+
+        name = self._closed_name()
+        seed = self.random_state
+        if name == "affine":
+            if task == "regression":
+                return AffineRuleRegressor(
+                    n_trees=self.n_trees, min_leaf=self.min_leaf, random_state=seed
+                )
+            return AffineRuleClassifier(
+                n_trees=self.n_trees, min_leaf=min(self.min_leaf, 40), random_state=seed
+            )
+        if name == "residual":
+            if task == "regression":
+                return ResidualRuleRegressor(
+                    n_rounds=self.n_rounds,
+                    n_trees=self.n_trees,
+                    smooth=self.smooth,
+                    random_state=seed,
+                )
+            return ResidualRuleClassifier(
+                n_rounds=self.n_rounds,
+                n_trees=min(self.n_trees, 8),
+                random_state=seed,
+            )
+        if name == "piecewise":
+            cls = PiecewiseGAMRegressor if task == "regression" else PiecewiseGAMClassifier
+            return cls(random_state=seed)
+        if name == "split_linear":
+            cls = SplitLinearRegressor if task == "regression" else SplitLinearClassifier
+            return cls(random_state=seed)
+        raise ValueError(name)
+
+    def _fit_closed(self, X_t, y, task: str):
+        self.rulebook_ = self._build_closed(task)
+        self.rulebook_.fit(X_t, y)
+        return self
+
     def _build_module(self, input_dim: int, n_classes: int) -> EFM:
         normalize_aggregator_name(self.aggregator)
         return EFM(
@@ -109,13 +169,20 @@ class _EFMBase(BaseEstimator):
 
     def explain(self, feature_names=None, top_k: int = 10, mask_threshold=None) -> str:
         check_is_fitted(self)
-        names = feature_names or self.feature_names_in_
+        names = feature_names or getattr(self, "feature_names_in_", None)
+        if hasattr(self, "rulebook_"):
+            return self.rulebook_.explain(feature_names=names, max_rules=top_k)
         return RuleExplainer(self.module_, names).format_rules(
             top_k=top_k, mask_threshold=mask_threshold
         )
 
     def plot_rules(self, feature_names=None, top_k: int = 10):
         check_is_fitted(self)
+        if hasattr(self, "rulebook_"):
+            raise AttributeError(
+                "plot_rules is defined for differentiable aggregators; "
+                "closed-form books use explain()."
+            )
         names = feature_names or self.feature_names_in_
         return RuleExplainer(self.module_, names).plot_structure(top_k=top_k)
 
@@ -142,6 +209,10 @@ class EFMRegressor(_EFMBase, RegressorMixin):
         X_va_t = self.preprocessor_.transform(X_va).astype(np.float32)
         self.feature_names_in_: list[str] = list(X_df.columns)
 
+        if self._closed_name() is not None:
+            X_all = self.preprocessor_.transform(X_df).astype(np.float32)
+            return self._fit_closed(X_all, y_arr, task="regression")
+
         self.y_scaler_ = StandardScaler()
         y_tr_s = self.y_scaler_.fit_transform(y_tr.reshape(-1, 1)).ravel().astype(np.float32)
         y_va_s = self.y_scaler_.transform(y_va.reshape(-1, 1)).ravel().astype(np.float32)
@@ -156,6 +227,8 @@ class EFMRegressor(_EFMBase, RegressorMixin):
     def predict(self, X) -> np.ndarray:
         check_is_fitted(self)
         X_t = self.preprocessor_.transform(self._to_df(X)).astype(np.float32)
+        if hasattr(self, "rulebook_"):
+            return self.rulebook_.predict(X_t)
         return self.trainer_.predict(X_t, task="regression", y_scaler=self.y_scaler_)
 
 class EFMClassifier(_EFMBase, ClassifierMixin):
@@ -193,6 +266,16 @@ class EFMClassifier(_EFMBase, ClassifierMixin):
         X_va_t = self.preprocessor_.transform(X_va).astype(np.float32)
         self.feature_names_in_: list[str] = list(X_df.columns)
 
+        if self._closed_name() is not None:
+            if n_classes > 2 and self._closed_name() in ("affine", "residual"):
+                raise ValueError(
+                    "aggregator='affine' and 'residual' currently support binary "
+                    "classification only; use a differentiable aggregator or "
+                    "'piecewise' / 'split_linear'."
+                )
+            X_all = self.preprocessor_.transform(X_df).astype(np.float32)
+            return self._fit_closed(X_all, y_enc, task="classification")
+
         self.module_ = self._build_module(X_tr_t.shape[1], n_classes=n_classes)
         self.module_.init_from_data(X_tr_t)
 
@@ -206,7 +289,10 @@ class EFMClassifier(_EFMBase, ClassifierMixin):
     def predict(self, X) -> np.ndarray:
         check_is_fitted(self)
         X_t = self.preprocessor_.transform(self._to_df(X)).astype(np.float32)
-        idx = self.trainer_.predict(X_t, task="classification")
+        if hasattr(self, "rulebook_"):
+            idx = self.rulebook_.predict(X_t).astype(int)
+        else:
+            idx = self.trainer_.predict(X_t, task="classification")
         return self.label_encoder_.inverse_transform(idx.astype(int))
 
     def predict_proba(self, X) -> np.ndarray:
@@ -214,5 +300,7 @@ class EFMClassifier(_EFMBase, ClassifierMixin):
         import torch.nn.functional as F
         check_is_fitted(self)
         X_t = self.preprocessor_.transform(self._to_df(X)).astype(np.float32)
+        if hasattr(self, "rulebook_"):
+            return self.rulebook_.predict_proba(X_t)
         logits = self.trainer_.predict_proba(X_t)
         return F.softmax(torch.tensor(logits), dim=1).numpy()

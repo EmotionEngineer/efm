@@ -114,13 +114,24 @@ _ALIASES: dict[str, str] = {
     "smte": "student_t",
     "hyp": "hyperplane",
     "sc": "state_coupled",
+    # closed-form books (no PyTorch)
+    "bafl": "affine",
+    "rt_post": "residual",
+    "rt-post": "residual",
+    "pwl": "piecewise",
+    "pwl_gam": "piecewise",
+    "twolaw": "split_linear",
+    "split": "split_linear",
 }
 
+# Spectral-floored ridge books. Dispatch happens in the sklearn wrappers.
+CLOSED_FORM = {"affine", "residual", "piecewise", "split_linear"}
+
 def normalize_aggregator_name(spec: str) -> str:
-    key = str(spec).strip().lower()
+    key = str(spec).strip().lower().replace("-", "_")
     key = _ALIASES.get(key, key)
-    if key not in AGGREGATORS:
-        valid = sorted(set(AGGREGATORS) | set(_ALIASES))
+    if key not in AGGREGATORS and key not in CLOSED_FORM:
+        valid = sorted(set(AGGREGATORS) | set(_ALIASES) | set(CLOSED_FORM))
         raise ValueError(f"Unknown aggregator '{spec}'. Choose from {valid}.")
     return key
 

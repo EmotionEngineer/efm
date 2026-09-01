@@ -167,11 +167,12 @@ class _EFMBase(BaseEstimator):
             kappa_gating=self.kappa_gating,
         )
 
-    def explain(self, feature_names=None, top_k: int = 10, mask_threshold=None) -> str:
+    def explain(self, feature_names=None, top_k: int = 10, mask_threshold=None, **kwargs) -> str:
         check_is_fitted(self)
         names = feature_names or getattr(self, "feature_names_in_", None)
         if hasattr(self, "rulebook_"):
-            return self.rulebook_.explain(feature_names=names, max_rules=top_k)
+            max_rules = int(kwargs.get("max_rules", top_k))
+            return self.rulebook_.explain(feature_names=names, max_rules=max_rules)
         return RuleExplainer(self.module_, names).format_rules(
             top_k=top_k, mask_threshold=mask_threshold
         )

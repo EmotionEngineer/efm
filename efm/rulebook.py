@@ -581,6 +581,7 @@ class ResidualRuleClassifier(BaseEstimator, ClassifierMixin):
         X = _to_array(X)
         y = np.asarray(y).ravel()
         self.classes_ = np.unique(y)
+        self.n_features_in_ = X.shape[1]
         yb = (y == self.classes_.max()).astype(float)
         seed = int(self.random_state or 0)
         self.carts_: list[DecisionTreeRegressor] = []
@@ -631,11 +632,22 @@ class ResidualRuleClassifier(BaseEstimator, ClassifierMixin):
         idx = (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
         return self.classes_[idx]
 
+    def _expanded_names(self, feature_names=None) -> list[str]:
+        d = int(getattr(self, "n_features_in_", 0) or (feature_names and len(feature_names) or 0))
+        if not d and hasattr(self, "carts_") and self.carts_:
+            d = int(self.carts_[0].n_features_in_)
+        names = list(feature_names) if feature_names is not None else [f"x{j}" for j in range(d)]
+        names = names[:d]
+        for rd, ids in enumerate(getattr(self, "leaf_ids_", [])):
+            for k in range(len(ids)):
+                names.append(f"cart{rd}_L{k}")
+        return names
+
     def explain(self, feature_names=None, max_rules: int = 16) -> str:
         check_is_fitted(self)
         return (
             f"ResidualRuleBook  n_rounds={self.n_rounds} (classifier)\n"
-            + self.core_.explain(None, max_rules=max_rules)
+            + self.core_.explain(self._expanded_names(feature_names), max_rules=max_rules)
         )
 
 
@@ -669,6 +681,35 @@ def _irls_or_sfr(D: np.ndarray, y: np.ndarray, task: str, lam: float = 2.0):
         coef = sfr(D * sw[:, None], z * sw, lam=lam, eps=5e-3)
         eta = f0 + D @ coef
     return coef, f0
+
+
+def _pwl_explain(cuts, coef, feature_names=None, intercept: float = 0.0, link: str = "") -> str:
+    d = len(cuts)
+    names = list(feature_names) if feature_names is not None else [f"x{j}" for j in range(d)]
+    names = (names + [f"x{j}" for j in range(len(names), d)])[:d]
+    c = np.asarray(coef, float).ravel()
+    b0 = float(intercept) + (float(c[0]) if c.size else 0.0)
+    lin = c[1 : 1 + d] if c.size > 1 else np.zeros(d)
+    rest = c[1 + d :]
+    lines = [
+        f"PiecewiseGAM  {link + ' ' if link else ''}two linear pieces / feature (joint SFR)  b0={b0:+.3f}"
+    ]
+    mag = []
+    for j in range(d):
+        sl = float(lin[j]) if j < len(lin) else 0.0
+        block = rest[4 * j : 4 * j + 4] if rest.size >= 4 * (j + 1) else np.zeros(4)
+        # left: aL + bL x ; right: aR + bR x  (plus global sl * x)
+        aL, bL, aR, bR = (float(block[k]) if k < len(block) else 0.0 for k in range(4))
+        left_s, right_s = sl + bL, sl + bR
+        mag.append((abs(left_s) + abs(right_s) + abs(aL) + abs(aR), j, aL, left_s, aR, right_s, cuts[j]))
+    mag.sort(reverse=True)
+    for _, j, aL, sL, aR, sR, t in mag[:8]:
+        nm = names[j]
+        lines.append(
+            f"  {nm}:  IF {nm}<= {t:+.3f} THEN {aL:+.3f}{sL:+.3f}*{nm}  "
+            f"ELSE {aR:+.3f}{sR:+.3f}*{nm}"
+        )
+    return "\n".join(lines)
 
 
 class PiecewiseGAMRegressor(BaseEstimator, RegressorMixin):
@@ -733,9 +774,7 @@ class PiecewiseGAMClassifier(BaseEstimator, ClassifierMixin):
 
     def explain(self, feature_names=None, **kwargs) -> str:
         check_is_fitted(self)
-        names = feature_names or [f"x{j}" for j in range(len(self.cuts_))]
-        bits = [f"{names[j]} @ {self.cuts_[j]:+.3f}" for j in range(min(12, len(self.cuts_)))]
-        return "PiecewiseGAM  σ(two linear pieces per feature)\n  cuts: " + ", ".join(bits)
+        return _pwl_explain(self.cuts_, self.coef_, feature_names, intercept=self.f0_, link="σ")
 
 
 def _two_design(Xs: np.ndarray, v: np.ndarray, t: float) -> np.ndarray:

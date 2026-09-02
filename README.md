@@ -228,7 +228,7 @@ Rule #01  [id=12, importance=0.8342, n_conds=3, ν=3.91]
 
 - Thresholds are in the **transformed** space (standardized numerics, one-hot categoricals).
 - Pass `model.preprocessor_.get_feature_names_out()` if you need those names explicitly.
-- Closed-form aggregators implement `explain()` only.
+- Closed-form aggregators implement `explain()` only (`plot_rules` is fuzzy-specific).
 
 ---
 
@@ -305,7 +305,7 @@ python -m build
 - With `kappa_gating=False`, masks sit inside the fuzzy subset and can train slowly on small data. Use `kappa_gating=True` when feature selection must be sharp.
 - High-cardinality categoricals expand into many one-hot columns.
 - Explanation thresholds are post-preprocessing.
-- `"affine"` and `"residual"` classifiers are **binary**. For multiclass use a fuzzy aggregator, or `"piecewise"` / `"split_linear"`.
+- `"affine"` and `"residual"` classifiers are **binary** in the library. `"piecewise"` and `"split_linear"` classifiers are binary too (`ŷ = σ(·)` vs the max label). For multiclass use a fuzzy aggregator, or wrap a closed book in one-vs-rest (see `examples/synthetic.ipynb`).
 
 ---
 

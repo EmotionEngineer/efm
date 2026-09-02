@@ -555,7 +555,18 @@ class ResidualRuleRegressor(BaseEstimator, RegressorMixin):
             f"ResidualRuleBook  n_rounds={self.n_rounds}, "
             f"path-smooth T={self.smooth}\n"
         )
-        return head + self.core_.explain(None, max_rules=max_rules)
+        return head + self.core_.explain(
+            self._expanded_names(feature_names), max_rules=max_rules
+        )
+
+    def _expanded_names(self, feature_names=None) -> list[str]:
+        d = int(self.n_features_in_)
+        names = list(feature_names) if feature_names is not None else [f"x{j}" for j in range(d)]
+        names = names[:d]
+        for rd, ids in enumerate(getattr(self, "leaf_ids_", [])):
+            for k in range(len(ids)):
+                names.append(f"cart{rd}_L{k}")
+        return names
 
 
 class ResidualRuleClassifier(BaseEstimator, ClassifierMixin):
@@ -736,9 +747,7 @@ class PiecewiseGAMRegressor(BaseEstimator, RegressorMixin):
 
     def explain(self, feature_names=None, **kwargs) -> str:
         check_is_fitted(self)
-        names = feature_names or [f"x{j}" for j in range(len(self.cuts_))]
-        bits = [f"{names[j]} @ {self.cuts_[j]:+.3f}" for j in range(len(self.cuts_))]
-        return "PiecewiseGAM  two linear pieces per feature (joint SFR)\n  cuts: " + ", ".join(bits[:12])
+        return _pwl_explain(self.cuts_, self.coef_, feature_names, intercept=0.0, link="")
 
 
 class PiecewiseGAMClassifier(BaseEstimator, ClassifierMixin):

@@ -210,9 +210,9 @@ def _soft_rule_design(Xs: np.ndarray, trees: list, nlabs: list[int], temperature
     for tree, nl in zip(trees, nlabs):
         paths: list[list] = []
 
-        def walk(node, ineq):
+        def walk(node, ineq, acc=paths):
             if node["kind"] == "leaf":
-                paths.append(ineq)
+                acc.append(ineq)
                 return
             walk(node["L"], ineq + [(node["j"], node["t"], +1)])
             walk(node["R"], ineq + [(node["j"], node["t"], -1)])
@@ -514,7 +514,7 @@ class ResidualRuleRegressor(BaseEstimator, RegressorMixin):
                 ids = np.unique(tree.apply(X))
                 self.leaf_ids_.append(ids)
                 extras.append(_leaf_indicators(tree, X, ids))
-            Xe = np.c_[X, *extras]
+            Xe = np.concatenate([X] + extras, axis=1) if extras else X
             core = _AffineCore(
                 n_trees=self.n_trees, min_leaf=80, random_state=seed + 50 * (rd + 1)
             )
@@ -534,7 +534,10 @@ class ResidualRuleRegressor(BaseEstimator, RegressorMixin):
         extras = [
             _leaf_indicators(tree, X, ids) for tree, ids in zip(self.carts_, self.leaf_ids_)
         ]
-        return np.c_[X, *extras] if extras else X
+        extras = [
+            _leaf_indicators(tree, X, ids) for tree, ids in zip(self.carts_, self.leaf_ids_)
+        ]
+        return np.concatenate([X] + extras, axis=1) if extras else X
 
     def predict(self, X) -> np.ndarray:
         check_is_fitted(self)
@@ -620,7 +623,7 @@ class ResidualRuleClassifier(BaseEstimator, ClassifierMixin):
                 ids = np.unique(tree.apply(X))
                 self.leaf_ids_.append(ids)
                 extras.append(_leaf_indicators(tree, X, ids))
-            Xe = np.c_[X, *extras]
+            Xe = np.concatenate([X] + extras, axis=1) if extras else X
             core = _LogisticAffineCore(
                 n_trees=self.n_trees, min_leaf=40, random_state=seed + 50 * (rd + 1)
             )
@@ -633,7 +636,7 @@ class ResidualRuleClassifier(BaseEstimator, ClassifierMixin):
         extras = [
             _leaf_indicators(tree, X, ids) for tree, ids in zip(self.carts_, self.leaf_ids_)
         ]
-        return np.c_[X, *extras] if extras else X
+        return np.concatenate([X] + extras, axis=1) if extras else X
 
     def predict_proba(self, X) -> np.ndarray:
         check_is_fitted(self)
